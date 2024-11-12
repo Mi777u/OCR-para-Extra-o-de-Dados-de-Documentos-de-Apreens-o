@@ -1,0 +1,143 @@
+import os
+import cv2
+import pytesseract
+from PIL import Image
+import re
+import json
+from flask import Flask, request, jsonify
+from werkzeug.utils import secure_filename
+
+# Configurações do Flask
+app = Flask(__name__)
+
+# Caminho para salvar as imagens carregadas
+UPLOAD_FOLDER = './uploads'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# Instalar o idioma português (por) para o Tesseract
+os.system('apt-get update')
+os.system('apt-get install -y tesseract-ocr-por')
+
+# Configurar o caminho do Tesseract (em Colab, o caminho é geralmente este)
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
+# Função para tentar extrair os dados
+def extract_data(text):
+    # Expressões regulares para capturar os dados desejados
+    data = {
+        "Motivo da apreensão": None,
+        "Cidade": None,
+        "Pátio de apreensão": None,
+        "Endereço do pátio": None,
+        "Observações": None,
+        "Órgão de apreensão": None
+    }
+
+    # Buscar o motivo da apreensão
+    motivo_pattern = re.compile(r"(Motivo da apreensão|Motivo\s*[:\-]?\s*)([^\n]+)", re.IGNORECASE)
+    match = motivo_pattern.search(text)
+    if match:
+        data["Motivo da apreensão"] = match.group(2).strip()
+
+    # Buscar a cidade
+    cidade_pattern = re.compile(r"(Cidade|Município)\s*[:\-]?\s*([^\n]+)", re.IGNORECASE)
+    match = cidade_pattern.search(text)
+    if match:
+        data["Cidade"] = match.group(2).strip()
+
+    # Buscar o pátio de apreensão
+    patio_pattern = re.compile(r"(Pátio de apreensão|Pátio)\s*[:\-]?\s*([^\n]+)", re.IGNORECASE)
+    match = patio_pattern.search(text)
+    if match:
+        data["Pátio de apreensão"] = match.group(2).strip()
+
+    # Buscar o endereço do pátio
+    endereco_pattern = re.compile(r"(Endereço do pátio|Endereço)\s*[:\-]?\s*([^\n]+)", re.IGNORECASE)
+    match = endereco_pattern.search(text)
+    if match:
+        data["Endereço do pátio"] = match.group(2).strip()
+
+    # Buscar as observações
+    observacoes_pattern = re.compile(r"(Observações|Observação)\s*[:\-]?\s*([^\n]+)", re.IGNORECASE)
+    match = observacoes_pattern.search(text)
+    if match:
+        data["Observações"] = match.group(2).strip()
+
+    # Buscar o órgão de apreensão
+    orgao_pattern = re.compile(r"(Órgão de apreensão|Órgão)\s*[:\-]?\s*([^\n]+)", re.IGNORECASE)
+    match = orgao_pattern.search(text)
+    if match:
+        data["Órgão de apreensão"] = match.group(2).strip()
+
+    return data
+
+# Função para processar a imagem e extrair os dados
+def process_image(image_path):
+    # Carregar a imagem usando OpenCV
+    imagem = cv2.imread(image_path)
+
+    # Verificar se a imagem foi carregada corretamente
+    if imagem is None:
+        return False, None
+
+    # Converter a imagem do OpenCV (numpy array) para um objeto PIL
+    pil_image = Image.fromarray(imagem)
+
+    # Usar pytesseract para extrair texto da imagem
+    texto = pytesseract.image_to_string(pil_image, lang='por')  # Definir o idioma como português
+
+    # Verificar se o texto extraído contém dados suficientes
+    if not texto.strip():
+        return False, None
+
+    # Extrair os dados da string de texto
+    extracted_data = extract_data(texto)
+
+    # Verificar se todos os dados essenciais foram extraídos corretamente
+    if any(value is None for value in extracted_data.values()):
+        return False, None
+
+    return True, extracted_data
+
+# Função para verificar se a extensão do arquivo é permitida
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# Rota para upload da imagem e extração dos dados
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    file = request.files['file']
+
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    if file and allowed_file(file.filename):
+        # Salvar o arquivo com um nome seguro
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+
+        # Processar a imagem e extrair os dados
+        status, data = process_image(file_path)
+
+        if status:
+            return jsonify({"success": True, "data": data}), 200
+        else:
+            return jsonify({"success": False, "error": "Falha na extração dos dados"}), 400
+    else:
+        return jsonify({"error": "File type not allowed"}), 400
+
+# Rota para verificar se a API está funcionando
+@app.route('/status', methods=['GET'])
+def status():
+    return jsonify({"status": "API is running"}), 200
+
+if __name__ == '__main__':
+    # Criar o diretório de upload caso não exista
+    if not os.path.exists(UPLOAD_FOLDER):
+        os.makedirs(UPLOAD_FOLDER)
+
+    app.run(debug=True, host='0.0.0.0', port=5000)
