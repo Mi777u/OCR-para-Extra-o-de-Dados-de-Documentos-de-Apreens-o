@@ -1,13 +1,23 @@
+import os
 import cv2
 import pytesseract
 from PIL import Image
 import re
 import json
-from google.colab import files
+from flask import Flask, request, jsonify
+from werkzeug.utils import secure_filename
+
+# Configurações do Flask
+app = Flask(__name__)
+
+# Caminho para salvar as imagens carregadas
+UPLOAD_FOLDER = './uploads'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # Instalar o idioma português (por) para o Tesseract
-!apt-get update
-!apt-get install tesseract-ocr-por
+os.system('apt-get update')
+os.system('apt-get install -y tesseract-ocr-por')
 
 # Configurar o caminho do Tesseract (em Colab, o caminho é geralmente este)
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
@@ -62,14 +72,13 @@ def extract_data(text):
 
     return data
 
-# Função principal
+# Função para processar a imagem e extrair os dados
 def process_image(image_path):
     # Carregar a imagem usando OpenCV
     imagem = cv2.imread(image_path)
 
     # Verificar se a imagem foi carregada corretamente
     if imagem is None:
-        print(f"Erro: A imagem {image_path} não foi carregada corretamente.")
         return False, None
 
     # Converter a imagem do OpenCV (numpy array) para um objeto PIL
@@ -78,45 +87,57 @@ def process_image(image_path):
     # Usar pytesseract para extrair texto da imagem
     texto = pytesseract.image_to_string(pil_image, lang='por')  # Definir o idioma como português
 
-    # Exibir o texto extraído para depuração
-    print("Texto extraído:", texto)
-
     # Verificar se o texto extraído contém dados suficientes
     if not texto.strip():
-        return False, None  # Caso o OCR não consiga ler nada
+        return False, None
 
     # Extrair os dados da string de texto
     extracted_data = extract_data(texto)
 
-    # Exibir os dados extraídos para depuração
-    print("Dados extraídos:", extracted_data)
-
     # Verificar se todos os dados essenciais foram extraídos corretamente
     if any(value is None for value in extracted_data.values()):
-        print("Falha na extração de alguns dados.")
-        return False, extracted_data  # Se faltar algum dado importante, retorna False
-
-    # Salvar os dados em um arquivo JSON
-    with open('dados_apreensao.json', 'w', encoding='utf-8') as f:
-        json.dump(extracted_data, f, ensure_ascii=False, indent=4)
+        return False, None
 
     return True, extracted_data
 
-# Fazer upload da imagem
-uploaded = files.upload()
+# Função para verificar se a extensão do arquivo é permitida
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# Verificar os arquivos carregados
-for filename in uploaded.keys():
-    print('Arquivo carregado:', filename)
+# Rota para upload da imagem e extração dos dados
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    file = request.files['file']
 
-# Definir o caminho da imagem carregada
-image_path = list(uploaded.keys())[0]  # O nome do arquivo carregado será a chave do dicionário
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
 
-# Processar a imagem
-status, data = process_image(image_path)
+    if file and allowed_file(file.filename):
+        # Salvar o arquivo com um nome seguro
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
 
-# Imprimir o status e os dados extraídos
-if status:
-    print("Extração bem-sucedida. Dados:", data)
-else:
-    print("Falha na extração de dados.")
+        # Processar a imagem e extrair os dados
+        status, data = process_image(file_path)
+
+        if status:
+            return jsonify({"success": True, "data": data}), 200
+        else:
+            return jsonify({"success": False, "error": "Falha na extração dos dados"}), 400
+    else:
+        return jsonify({"error": "File type not allowed"}), 400
+
+# Rota para verificar se a API está funcionando
+@app.route('/status', methods=['GET'])
+def status():
+    return jsonify({"status": "API is running"}), 200
+
+if __name__ == '__main__':
+    # Criar o diretório de upload caso não exista
+    if not os.path.exists(UPLOAD_FOLDER):
+        os.makedirs(UPLOAD_FOLDER)
+
+    app.run(debug=True, host='0.0.0.0', port=5000)
